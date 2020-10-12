@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # Copyright 2015 Conchylicultor. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,14 +24,19 @@ import pickle  # Saving the data
 import math  # For float comparison
 import os  # Checking file existance
 import random
+import string
+import collections
 
-from chatbot.twitter_generate_data_pickle import get_data
+from chatbot.corpus.cornelldata import CornellData
+from chatbot.corpus.opensubsdata import OpensubsData
+from chatbot.corpus.scotusdata import ScotusData
+from chatbot.corpus.ubuntudata import UbuntuData
+from chatbot.corpus.lightweightdata import LightweightData
 
 
 class Batch:
     """Struct containing batches info
     """
-
     def __init__(self):
         self.encoderSeqs = []
         self.decoderSeqs = []
@@ -46,6 +49,22 @@ class TextData:
     Warning: No vocabulary limit
     """
 
+    availableCorpus = collections.OrderedDict([  # OrderedDict because the first element is the default choice
+        ('cornell', CornellData),
+        ('opensubs', OpensubsData),
+        ('scotus', ScotusData),
+        ('ubuntu', UbuntuData),
+        ('lightweight', LightweightData),
+    ])
+
+    @staticmethod
+    def corpusChoices():
+        """Return the dataset availables
+        Return:
+            list<string>: the supported corpus
+        """
+        return list(TextData.availableCorpus.keys())
+
     def __init__(self, args):
         """Load all conversations
         Args:
@@ -55,11 +74,14 @@ class TextData:
         self.args = args
 
         # Path variables
-        self.corpusDir = os.path.join(self.args.rootDir, 'data/cornell/')
-        self.samplesDir = os.path.join(self.args.rootDir, 'data/samples/')
-        self.twitter_name = self.args.twitter_name
-        self.samplesName = self._constructName()
-        self.max_tweets = self.args.max_tweets
+        self.corpusDir = os.path.join(self.args.rootDir, 'data', self.args.corpus)
+        basePath = self._constructBasePath()
+        self.fullSamplesPath = basePath + '.pkl'  # Full sentences length/vocab
+        self.filteredSamplesPath = basePath + '-length{}-filter{}-vocabSize{}.pkl'.format(
+            self.args.maxLength,
+            self.args.filterVocab,
+            self.args.vocabularySize,
+        )  # Sentences/vocab filtered for this model
 
         self.padToken = -1  # Padding
         self.goToken = -1  # Start of sequence
@@ -69,34 +91,41 @@ class TextData:
         self.trainingSamples = []  # 2d array containing each question and his answer [[input,target]]
 
         self.word2id = {}
-        self.id2word = {}  # For a rapid conversion
+        self.id2word = {}  # For a rapid conversion (Warning: If replace dict by list, modify the filtering to avoid linear complexity with del)
+        self.idCount = {}  # Useful to filters the words (TODO: Could replace dict by list or use collections.Counter)
 
-        self.loadCorpus(self.samplesDir)
+        self.loadCorpus()
 
         # Plot some stats:
-        print('Loaded: {} words, {} QA'.format(len(self.word2id), len(self.trainingSamples)))
+        self._printStats()
 
         if self.args.playDataset:
             self.playDataset()
 
-    def _constructName(self):
-        """Return the name of the dataset that the program should use with the current parameters.
-        Computer from the base name, the given tag (self.args.datasetTag) and the sentence length
+    def _printStats(self):
+        print('Loaded {}: {} words, {} QA'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
+
+    def _constructBasePath(self):
+        """Return the name of the base prefix of the current dataset
         """
-        baseName = self.twitter_name + '-dataset'
+        path = os.path.join(self.args.rootDir, 'data' + os.sep + 'samples' + os.sep)
+        path += 'dataset-{}'.format(self.args.corpus)
         if self.args.datasetTag:
-            baseName += '-' + self.args.datasetTag
-        return baseName + '-' + str(self.args.maxLength) + '.pkl'
+            path += '-' + self.args.datasetTag
+        return path
 
     def makeLighter(self, ratioDataset):
         """Only keep a small fraction of the dataset, given by the ratio
         """
+        #if not math.isclose(ratioDataset, 1.0):
+        #    self.shuffle()  # Really ?
+        #    print('WARNING: Ratio feature not implemented !!!')
         pass
 
     def shuffle(self):
         """Shuffle the training samples
         """
-        print("Shuffling the dataset...")
+        print('Shuffling the dataset...')
         random.shuffle(self.trainingSamples)
 
     def _createBatch(self, samples):
@@ -119,27 +148,26 @@ class TextData:
             sample = samples[i]
             if not self.args.test and self.args.watsonMode:  # Watson mode: invert question and answer
                 sample = list(reversed(sample))
-            # Reverse inputs (and not outputs), little trick as defined on the
-            # original seq2seq paper
-            batch.encoderSeqs.append(list(reversed(sample[0])))
-            # Add the <go> and <eos> tokens
-            batch.decoderSeqs.append([self.goToken] + sample[1] + [self.eosToken])
-            # Same as decoder, but shifted to the left (ignore the <go>)
-            batch.targetSeqs.append(batch.decoderSeqs[-1][1:])
+            if not self.args.test and self.args.autoEncode:  # Autoencode: use either the question or answer for both input and output
+                k = random.randint(0, 1)
+                sample = (sample[k], sample[k])
+            # TODO: Why re-processed that at each epoch ? Could precompute that
+            # once and reuse those every time. Is not the bottleneck so won't change
+            # much ? and if preprocessing, should be compatible with autoEncode & cie.
+            batch.encoderSeqs.append(list(reversed(sample[0])))  # Reverse inputs (and not outputs), little trick as defined on the original seq2seq paper
+            batch.decoderSeqs.append([self.goToken] + sample[1] + [self.eosToken])  # Add the <go> and <eos> tokens
+            batch.targetSeqs.append(batch.decoderSeqs[-1][1:])  # Same as decoder, but shifted to the left (ignore the <go>)
 
             # Long sentences should have been filtered during the dataset creation
             assert len(batch.encoderSeqs[i]) <= self.args.maxLengthEnco
             assert len(batch.decoderSeqs[i]) <= self.args.maxLengthDeco
 
+            # TODO: Should use tf batch function to automatically add padding and batch samples
             # Add padding & define weight
-            batch.encoderSeqs[i] = [self.padToken] * (self.args.maxLengthEnco - len(
-                batch.encoderSeqs[i])) + batch.encoderSeqs[i]  # Left padding for the input
-            batch.weights.append([1.0] * len(batch.targetSeqs[i]) + [0.0] *
-                                 (self.args.maxLengthDeco - len(batch.targetSeqs[i])))
-            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.padToken] * \
-                (self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
-            batch.targetSeqs[i] = batch.targetSeqs[i] + [self.padToken] * \
-                (self.args.maxLengthDeco - len(batch.targetSeqs[i]))
+            batch.encoderSeqs[i]   = [self.padToken] * (self.args.maxLengthEnco  - len(batch.encoderSeqs[i])) + batch.encoderSeqs[i]  # Left padding for the input
+            batch.weights.append([1.0] * len(batch.targetSeqs[i]) + [0.0] * (self.args.maxLengthDeco - len(batch.targetSeqs[i])))
+            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.padToken] * (self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
+            batch.targetSeqs[i]  = batch.targetSeqs[i]  + [self.padToken] * (self.args.maxLengthDeco - len(batch.targetSeqs[i]))
 
         # Simple hack to reshape the batch
         encoderSeqsT = []  # Corrected orientation
@@ -190,6 +218,8 @@ class TextData:
             for i in range(0, self.getSampleSize(), self.args.batchSize):
                 yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize())]
 
+        # TODO: Should replace that by generator (better: by tf.queue)
+
         for samples in genNextSamples():
             batch = self._createBatch(samples)
             batches.append(batch)
@@ -209,59 +239,193 @@ class TextData:
         """
         return len(self.word2id)
 
-    def loadCorpus(self, dirName):
+    def loadCorpus(self):
         """Load/create the conversations data
-        Args:
-            dirName (str): The directory where to load/save the model
         """
-        get_data(self.twitter_name, self.args.maxLength, self.max_tweets)
-        self.loadDataset(dirName)
+        datasetExist = os.path.isfile(self.filteredSamplesPath)
+        if not datasetExist:  # First time we load the database: creating all files
+            print('Training samples not found. Creating dataset...')
+
+            datasetExist = os.path.isfile(self.fullSamplesPath)  # Try to construct the dataset from the preprocessed entry
+            if not datasetExist:
+                print('Constructing full dataset...')
+
+                optional = ''
+                if self.args.corpus == 'lightweight':
+                    if not self.args.datasetTag:
+                        raise ValueError('Use the --datasetTag to define the lightweight file to use.')
+                    optional = os.sep + self.args.datasetTag  # HACK: Forward the filename
+
+                # Corpus creation
+                corpusData = TextData.availableCorpus[self.args.corpus](self.corpusDir + optional)
+                self.createFullCorpus(corpusData.getConversations())
+                self.saveDataset(self.fullSamplesPath)
+            else:
+                self.loadDataset(self.fullSamplesPath)
+            self._printStats()
+
+            print('Filtering words (vocabSize = {} and wordCount > {})...'.format(
+                self.args.vocabularySize,
+                self.args.filterVocab
+            ))
+            self.filterFromFull()  # Extract the sub vocabulary for the given maxLength and filterVocab
+
+            # Saving
+            print('Saving dataset...')
+            self.saveDataset(self.filteredSamplesPath)  # Saving tf samples
+        else:
+            self.loadDataset(self.filteredSamplesPath)
 
         assert self.padToken == 0
 
-    def saveDataset(self, dirName):
+    def saveDataset(self, filename):
         """Save samples to file
         Args:
-            dirName (str): The directory where to load/save the model
+            filename (str): pickle filename
         """
 
-        with open(os.path.join(dirName, self.samplesName), 'wb') as handle:
+        with open(os.path.join(filename), 'wb') as handle:
             data = {  # Warning: If adding something here, also modifying loadDataset
-                "word2id": self.word2id,
-                "id2word": self.id2word,
-                "trainingSamples": self.trainingSamples
+                'word2id': self.word2id,
+                'id2word': self.id2word,
+                'idCount': self.idCount,
+                'trainingSamples': self.trainingSamples
             }
             pickle.dump(data, handle, -1)  # Using the highest protocol available
 
-    def loadDataset(self, dirName):
+    def loadDataset(self, filename):
         """Load samples from file
         Args:
-            dirName (str): The directory where to load the model
+            filename (str): pickle filename
         """
-        with open(os.path.join(dirName, self.samplesName), 'rb') as handle:
-            # Warning: If adding something here, also modifying saveDataset
-            data = pickle.load(handle)
-            self.word2id = data["word2id"]
-            self.id2word = data["id2word"]
-            self.trainingSamples = data["trainingSamples"]
+        dataset_path = os.path.join(filename)
+        print('Loading dataset from {}'.format(dataset_path))
+        with open(dataset_path, 'rb') as handle:
+            data = pickle.load(handle)  # Warning: If adding something here, also modifying saveDataset
+            self.word2id = data['word2id']
+            self.id2word = data['id2word']
+            self.idCount = data.get('idCount', None)
+            self.trainingSamples = data['trainingSamples']
 
-            self.padToken = self.word2id["<pad>"]
-            self.goToken = self.word2id["<go>"]
-            self.eosToken = self.word2id["<eos>"]
-            self.unknownToken = self.word2id["<unknown>"]  # Restore special words
+            self.padToken = self.word2id['<pad>']
+            self.goToken = self.word2id['<go>']
+            self.eosToken = self.word2id['<eos>']
+            self.unknownToken = self.word2id['<unknown>']  # Restore special words
 
-    def createCorpus(self, conversations):
-        """Extract all data from the given vocabulary
+    def filterFromFull(self):
+        """ Load the pre-processed full corpus and filter the vocabulary / sentences
+        to match the given model options
+        """
+
+        def mergeSentences(sentences, fromEnd=False):
+            """Merge the sentences until the max sentence length is reached
+            Also decrement id count for unused sentences.
+            Args:
+                sentences (list<list<int>>): the list of sentences for the current line
+                fromEnd (bool): Define the question on the answer
+            Return:
+                list<int>: the list of the word ids of the sentence
+            """
+            # We add sentence by sentence until we reach the maximum length
+            merged = []
+
+            # If question: we only keep the last sentences
+            # If answer: we only keep the first sentences
+            if fromEnd:
+                sentences = reversed(sentences)
+
+            for sentence in sentences:
+
+                # If the total length is not too big, we still can add one more sentence
+                if len(merged) + len(sentence) <= self.args.maxLength:
+                    if fromEnd:  # Append the sentence
+                        merged = sentence + merged
+                    else:
+                        merged = merged + sentence
+                else:  # If the sentence is not used, neither are the words
+                    for w in sentence:
+                        self.idCount[w] -= 1
+            return merged
+
+        newSamples = []
+
+        # 1st step: Iterate over all words and add filters the sentences
+        # according to the sentence lengths
+        for inputWords, targetWords in tqdm(self.trainingSamples, desc='Filter sentences:', leave=False):
+            inputWords = mergeSentences(inputWords, fromEnd=True)
+            targetWords = mergeSentences(targetWords, fromEnd=False)
+
+            newSamples.append([inputWords, targetWords])
+        words = []
+
+        # WARNING: DO NOT FILTER THE UNKNOWN TOKEN !!! Only word which has count==0 ?
+
+        # 2nd step: filter the unused words and replace them by the unknown token
+        # This is also where we update the correnspondance dictionaries
+        specialTokens = {  # TODO: bad HACK to filter the special tokens. Error prone if one day add new special tokens
+            self.padToken,
+            self.goToken,
+            self.eosToken,
+            self.unknownToken
+        }
+        newMapping = {}  # Map the full words ids to the new one (TODO: Should be a list)
+        newId = 0
+
+        selectedWordIds = collections \
+            .Counter(self.idCount) \
+            .most_common(self.args.vocabularySize or None)  # Keep all if vocabularySize == 0
+        selectedWordIds = {k for k, v in selectedWordIds if v > self.args.filterVocab}
+        selectedWordIds |= specialTokens
+
+        for wordId, count in [(i, self.idCount[i]) for i in range(len(self.idCount))]:  # Iterate in order
+            if wordId in selectedWordIds:  # Update the word id
+                newMapping[wordId] = newId
+                word = self.id2word[wordId]  # The new id has changed, update the dictionaries
+                del self.id2word[wordId]  # Will be recreated if newId == wordId
+                self.word2id[word] = newId
+                self.id2word[newId] = word
+                newId += 1
+            else:  # Cadidate to filtering, map it to unknownToken (Warning: don't filter special token)
+                newMapping[wordId] = self.unknownToken
+                del self.word2id[self.id2word[wordId]]  # The word isn't used anymore
+                del self.id2word[wordId]
+
+        # Last step: replace old ids by new ones and filters empty sentences
+        def replace_words(words):
+            valid = False  # Filter empty sequences
+            for i, w in enumerate(words):
+                words[i] = newMapping[w]
+                if words[i] != self.unknownToken:  # Also filter if only contains unknown tokens
+                    valid = True
+            return valid
+
+        self.trainingSamples.clear()
+
+        for inputWords, targetWords in tqdm(newSamples, desc='Replace ids:', leave=False):
+            valid = True
+            valid &= replace_words(inputWords)
+            valid &= replace_words(targetWords)
+            valid &= targetWords.count(self.unknownToken) == 0  # Filter target with out-of-vocabulary target words ?
+
+            if valid:
+                self.trainingSamples.append([inputWords, targetWords])  # TODO: Could replace list by tuple
+
+        self.idCount.clear()  # Not usefull anymore. Free data
+
+    def createFullCorpus(self, conversations):
+        """Extract all data from the given vocabulary.
+        Save the data on disk. Note that the entire corpus is pre-processed
+        without restriction on the sentence length or vocab size.
         """
         # Add standard tokens
-        self.padToken = self.getWordId("<pad>")  # Padding (Warning: first things to add > id=0 !!)
-        self.goToken = self.getWordId("<go>")  # Start of sequence
-        self.eosToken = self.getWordId("<eos>")  # End of sequence
-        self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
+        self.padToken = self.getWordId('<pad>')  # Padding (Warning: first things to add > id=0 !!)
+        self.goToken = self.getWordId('<go>')  # Start of sequence
+        self.eosToken = self.getWordId('<eos>')  # End of sequence
+        self.unknownToken = self.getWordId('<unknown>')  # Word dropped from vocabulary
 
         # Preprocessing data
 
-        for conversation in tqdm(conversations, desc="Extract conversations"):
+        for conversation in tqdm(conversations, desc='Extract conversations'):
             self.extractConversation(conversation)
 
         # The dataset will be saved in the same order it has been extracted
@@ -269,58 +433,52 @@ class TextData:
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations
         Args:
-            conversation (Obj): a convesation object containing the lines to extract
+            conversation (Obj): a conversation object containing the lines to extract
         """
 
-        # Iterate over all the lines of the conversation
-        # We ignore the last line (no answer for it)
-        for i in range(len(conversation["lines"]) - 1):
-            inputLine = conversation["lines"][i]
-            targetLine = conversation["lines"][i + 1]
+        if self.args.skipLines:  # WARNING: The dataset won't be regenerated if the choice evolve (have to use the datasetTag)
+            step = 2
+        else:
+            step = 1
 
-            inputWords = self.extractText(inputLine["text"])
-            targetWords = self.extractText(targetLine["text"], True)
+        # Iterate over all the lines of the conversation
+        for i in tqdm_wrap(
+            range(0, len(conversation['lines']) - 1, step),  # We ignore the last line (no answer for it)
+            desc='Conversation',
+            leave=False
+        ):
+            inputLine  = conversation['lines'][i]
+            targetLine = conversation['lines'][i+1]
+
+            inputWords  = self.extractText(inputLine['text'])
+            targetWords = self.extractText(targetLine['text'])
 
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
                 self.trainingSamples.append([inputWords, targetWords])
 
-    def extractText(self, line, isTarget=False):
+    def extractText(self, line):
         """Extract the words from a sample lines
         Args:
             line (str): a line containing the text to extract
-            isTarget (bool): Define the question on the answer
         Return:
-            list<int>: the list of the word ids of the sentence
+            list<list<int>>: the list of sentences of word ids of the sentence
         """
-        words = []
+        sentences = []  # List[List[str]]
 
         # Extract sentences
         sentencesToken = nltk.sent_tokenize(line)
 
         # We add sentence by sentence until we reach the maximum length
         for i in range(len(sentencesToken)):
-            # If question: we only keep the last sentences
-            # If answer: we only keep the first sentences
-            if not isTarget:
-                i = len(sentencesToken) - 1 - i
-
             tokens = nltk.word_tokenize(sentencesToken[i])
 
-            # If the total length is not too big, we still can add one more sentence
-            if len(words) + len(tokens) <= self.args.maxLength:
-                tempWords = []
-                for token in tokens:
-                    # Create the vocabulary and the training sentences
-                    tempWords.append(self.getWordId(token))
+            tempWords = []
+            for token in tokens:
+                tempWords.append(self.getWordId(token))  # Create the vocabulary and the training sentences
 
-                if isTarget:
-                    words = words + tempWords
-                else:
-                    words = tempWords + words
-            else:
-                break  # We reach the max length already
+            sentences.append(tempWords)
 
-        return words
+        return sentences
 
     def getWordId(self, word, create=True):
         """Get the id of the word (and add it to the dictionary if not existing). If the word does not exist and
@@ -335,17 +493,19 @@ class TextData:
 
         word = word.lower()  # Ignore case
 
+        # At inference, we simply look up for the word
+        if not create:
+            wordId = self.word2id.get(word, self.unknownToken)
         # Get the id if the word already exist
-        wordId = self.word2id.get(word, -1)
-
+        elif word in self.word2id:
+            wordId = self.word2id[word]
+            self.idCount[wordId] += 1
         # If not, we create a new entry
-        if wordId == -1:
-            if create:
-                wordId = len(self.word2id)
-                self.word2id[word] = wordId
-                self.id2word[wordId] = word
-            else:
-                wordId = self.unknownToken
+        else:
+            wordId = len(self.word2id)
+            self.word2id[word] = wordId
+            self.id2word[wordId] = word
+            self.idCount[wordId] = 1
 
         return wordId
 
@@ -359,8 +519,7 @@ class TextData:
             print('Encoder: {}'.format(self.batchSeq2str(batch.encoderSeqs, seqId=i)))
             print('Decoder: {}'.format(self.batchSeq2str(batch.decoderSeqs, seqId=i)))
             print('Targets: {}'.format(self.batchSeq2str(batch.targetSeqs, seqId=i)))
-            print('Weights: {}'.format(
-                ' '.join([str(weight) for weight in [batchWeight[i] for batchWeight in batch.weights]])))
+            print('Weights: {}'.format(' '.join([str(weight) for weight in [batchWeight[i] for batchWeight in batch.weights]])))
 
     def sequence2str(self, sequence, clean=False, reverse=False):
         """Convert a list of integer into a human readable string
@@ -388,7 +547,20 @@ class TextData:
         if reverse:  # Reverse means input so no <eos> (otherwise pb with previous early stop)
             sentence.reverse()
 
-        return ' '.join(sentence)
+        return self.detokenize(sentence)
+
+    def detokenize(self, tokens):
+        """Slightly cleaner version of joining with spaces.
+        Args:
+            tokens (list<string>): the sentence to print
+        Return:
+            str: the sentence
+        """
+        return ''.join([
+            ' ' + t if not t.startswith('\'') and
+                       t not in string.punctuation
+                    else t
+            for t in tokens]).strip().capitalize()
 
     def batchSeq2str(self, batchSeq, seqId=0, **kwargs):
         """Convert a list of integer into a human readable string.
@@ -423,8 +595,7 @@ class TextData:
         # Second step: Convert the token in word ids
         wordIds = []
         for token in tokens:
-            # Create the vocabulary and the training sentences
-            wordIds.append(self.getWordId(token, create=False))
+            wordIds.append(self.getWordId(token, create=False))  # Create the vocabulary and the training sentences
 
         # Third step: creating the batch (add padding, reverse)
         batch = self._createBatch([[wordIds, []]])  # Mono batch, no target output
@@ -448,8 +619,22 @@ class TextData:
         """
         print('Randomly play samples:')
         for i in range(self.args.playDataset):
-            idSample = random.randint(0, len(self.trainingSamples))
-            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0])))
-            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1])))
+            idSample = random.randint(0, len(self.trainingSamples) - 1)
+            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0], clean=True)))
+            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1], clean=True)))
             print()
         pass
+
+
+def tqdm_wrap(iterable, *args, **kwargs):
+    """Forward an iterable eventually wrapped around a tqdm decorator
+    The iterable is only wrapped if the iterable contains enough elements
+    Args:
+        iterable (list): An iterable object which define the __len__ method
+        *args, **kwargs: the tqdm parameters
+    Return:
+        iter: The iterable eventually decorated
+    """
+    if len(iterable) > 100:
+        return tqdm(iterable, *args, **kwargs)
+    return iterable

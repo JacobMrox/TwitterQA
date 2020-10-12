@@ -3,4 +3,4 @@ tqdm
 numpy
 TwitterAPI
 requests_oauthlib
-tensorflow
+tensorflow==1.15
