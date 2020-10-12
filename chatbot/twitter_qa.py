@@ -8,6 +8,7 @@ from TwitterAPI import TwitterAPI
 with open("chatbot/credentials.json") as f:
     credentials = json.load(f)
 
+#Import our credntials from credentials.json into TwitterAPI
 api = TwitterAPI(**credentials)
 
 
