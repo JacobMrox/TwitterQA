@@ -61,9 +61,9 @@ The program requires the following dependencies:
  * tqdm (for the nice progression bars)
 
 ### Installing Dependencies
- These are easy to install using pip in terminal/CMD (example: pip install nltk)
- Or simply use "pip pip install -r requirements.txt" in terminal/CMD (Which will install all requirments - minus CUDA)
- Or simply use the provided 1) Install requirments.bat file (on Windows) to do the above
+ * These are easy to install using pip in terminal/CMD (example: pip install nltk)
+ * Or simply use "pip pip install -r requirements.txt" in terminal/CMD (Which will install all requirments - minus CUDA)
+ * Or simply use the provided 1) Install requirments.bat file (on Windows) to do the above
 
 ## Further instructions
 
