@@ -32,11 +32,11 @@ Run
 
     python main.py --twitter_name gvanrossum --test interactive
 
-to have an interactive QA session with Guido.
+to have an interactive QA session with Guido van Rossum.
 
 ## Example
 
-Question asked after having trained on default settings:
+Question asked after having trained on default settings (Guido van Rossum):
 
     Q: which editor do you use ?
     A: emacs of course !
