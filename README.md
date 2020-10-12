@@ -13,16 +13,21 @@ If there are companies out there who would like to have a custom QA application,
 
 ## Usage
 
-Fill in twitter credentials in `chatbot/credentials.json`.
+### Twitter API Credentials
+1) Register a Twitter API Developer account
 
+3) Fill in your Twitter dev credentials in `chatbot/credentials.json`.
+
+### Building the Bot
 Then you can run:
 
     python main.py --twitter_name gvanrossum
 
-to build a model after the BDFL.
+to build a model after the BDFL (where gvanrossum would be replaced by the username of the Twitter user you'd like to build the bot after)
 
 ... 20 minutes later ...
 
+### Testing your Bot
 Run
 
     python main.py --twitter_name gvanrossum --test interactive
@@ -45,7 +50,9 @@ You can see the collected twitter data at:
 
 ## Installation (quoting Conchylicultor)
 
-The program requires the following dependencies (easy to install using pip):
+### Dependencies
+The program requires the following dependencies:
+
  * python 3.5
  * tensorflow (tested with v0.9.0 and v0.11.0)
  * numpy
@@ -53,8 +60,13 @@ The program requires the following dependencies (easy to install using pip):
  * nltk (natural language toolkit for tokenized the sentences)
  * tqdm (for the nice progression bars)
 
+### Installing Dependencies
+ These are easy to install using pip in terminal/CMD (example: pip install nltk)
+ Or simply use "pip pip install -r requirements.txt" in terminal/CMD (Which will install all requirments - minus CUDA)
+ Or simply use the provided 1) Install requirments.bat file (on Windows) to do the above
+
 ## Further instructions
 
-You're advised to experiment with the possible paramters to make it a better model.
+You're advised to experiment with the possible parameters to make it a better model.
 
 Have a look at the [original repo](https://github.com/Conchylicultor/DeepQA) for more information.

@@ -1,5 +1,6 @@
 nltk
 tqdm
+numpy
 TwitterAPI
 requests_oauthlib
 tensorflow
